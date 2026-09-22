@@ -54,10 +54,12 @@ function segmentStyle(codings) {
 
 /**
  * 文本视图：渲染原子段并把鼠标拖选映射回字符区间。
+ * flashRange 闪烁单个区间；flashRanges（导入结果定位）同时闪烁多个区间。
  */
-export default function TextView({ content, codings, selection, flashRange, onSelect }) {
+export default function TextView({ content, codings, selection, flashRange, flashRanges, onSelect }) {
   const ref = useRef(null)
   const segments = useMemo(() => buildSegments(content, codings), [content, codings])
+  const flashes = flashRanges ?? (flashRange ? [flashRange] : null)
 
   function locateOffset(node, offset) {
     const container = ref.current
@@ -89,6 +91,10 @@ export default function TextView({ content, codings, selection, flashRange, onSe
     return range && seg.start < range.end && seg.end > range.start
   }
 
+  function inFlash(seg) {
+    return flashes !== null && flashes.some((r) => seg.start < r.end && seg.end > r.start)
+  }
+
   return (
     <div
       ref={ref}
@@ -100,7 +106,7 @@ export default function TextView({ content, codings, selection, flashRange, onSe
         const classes = ['seg']
         if (seg.codings.length > 0) classes.push('coded')
         if (inRange(seg, selection)) classes.push('selected')
-        if (inRange(seg, flashRange)) classes.push('flash')
+        if (inFlash(seg)) classes.push('flash')
         const title =
           seg.codings.length > 0
             ? seg.codings

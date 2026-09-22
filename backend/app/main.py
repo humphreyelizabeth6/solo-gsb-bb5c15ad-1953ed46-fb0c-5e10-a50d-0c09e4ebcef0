@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -22,6 +22,12 @@ from .cooccurrence import build_code_intervals, intersect_intervals
 from .db import get_db, init_db, list_codings, next_color
 from .distribution import compute_distribution
 from .gaps import compute_gaps
+from .importer import (
+    PackageError,
+    content_fingerprint,
+    parse_package,
+    plan_import,
+)
 from .speakers import compute_speaker_stats
 from .transitions import compute_transitions
 
@@ -475,6 +481,7 @@ def export_document(document_id: int) -> JSONResponse:
             "title": doc["title"],
             "content": content,
             "length": len(content),
+            "content_sha256": content_fingerprint(content),
         },
         "codes": codes,
         "codings": [
@@ -496,6 +503,86 @@ def export_document(document_id: int) -> JSONResponse:
         content=payload,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ---------- 标注包导入 ----------
+
+
+def _load_import_context(conn, document_id: int) -> tuple[dict, list[dict], list[dict]]:
+    doc = get_document_or_404(conn, document_id)
+    codes = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, name, color FROM codes ORDER BY id"
+        ).fetchall()
+    ]
+    return doc, codes, list_codings(conn, document_id)
+
+
+def _parse_import_body(payload: Any) -> dict:
+    try:
+        return parse_package(payload)
+    except PackageError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/documents/{document_id}/import/preview")
+def preview_import(document_id: int, payload: Any = Body(...)) -> dict:
+    """标注包导入预检（不写库）。
+
+    接收导出 JSON（结构非法返回 422），按编码名称映射当前编码本，校验文档
+    内容指纹、区间边界与重复项，把每条标注分类为新增 / 跳过 / 未知编码 /
+    冲突并返回明细；errors 非空表示硬校验失败（指纹不匹配或存在非法区间），
+    前端应禁止确认导入。
+    """
+    package = _parse_import_body(payload)
+    with get_db() as conn:
+        doc, codes, existing = _load_import_context(conn, document_id)
+    return plan_import(document_id, doc, codes, existing, package)
+
+
+@app.post("/api/documents/{document_id}/import", status_code=201)
+def import_package(document_id: int, payload: Any = Body(...)) -> dict:
+    """标注包导入：单事务写入全部合法新增标注。
+
+    在事务内重新完整校验（预检与确认之间数据可能已变化）：指纹不匹配或
+    存在非法区间即整批回滚（422），任何校验失败都不落库。校验通过后仅
+    写入「新增」类条目；跳过、未知编码与冲突条目不导入，仅在结果中列明。
+    """
+    package = _parse_import_body(payload)
+    with get_db() as conn:
+        doc, codes, existing = _load_import_context(conn, document_id)
+        plan = plan_import(document_id, doc, codes, existing, package)
+        if plan["errors"]:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "标注包校验失败，未导入任何标注",
+                    "errors": plan["errors"],
+                    "invalid": plan["invalid"],
+                },
+            )
+        created: list[dict] = []
+        for it in plan["to_create"]:
+            cur = conn.execute(
+                INSERT_CODING, (document_id, it["code_id"], it["start"], it["end"])
+            )
+            created.append(
+                {
+                    "id": cur.lastrowid,
+                    "code_id": it["code_id"],
+                    "code": it["code"],
+                    "start": it["start"],
+                    "end": it["end"],
+                }
+            )
+        return {
+            "created": created,
+            "skipped": plan["to_skip"],
+            "unknown_codes": plan["unknown_codes"],
+            "conflicts": plan["conflicts"],
+            "codings": list_codings(conn, document_id),
+        }
 
 
 # ---------- 编码共现统计 ----------

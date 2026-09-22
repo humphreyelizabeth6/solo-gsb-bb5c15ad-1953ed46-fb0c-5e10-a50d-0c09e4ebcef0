@@ -69,7 +69,12 @@ docker compose up --build
   - 前端支持**最小次数**与**最大间距**筛选（本地过滤，不重新请求）；展开条目查看每次转移的来源 / 目标**原文上下文**，点击实例自动切回正文、滚动并**闪烁定位来源起点到目标终点的整个跨度**；
   - 编码筛选或标注变化后转移列表同步刷新；**零标注**（无状态区间）与**无转移**（仅一段状态区间）时给出明确空状态。
   - 对应 `GET /api/documents/{id}/transitions?codes=1,2`（`codes` 为逗号分隔，缺省统计全部编码）。
-- **JSON 导出**：顶栏「导出 JSON」下载当前文档的完整编码结果（含每条标注的区间与原文切片），对应 `GET /api/documents/{id}/export`。
+- **JSON 导出**：顶栏「导出 JSON」下载当前文档的完整编码结果（含每条标注的区间与原文切片，以及文档内容指纹 `content_sha256`），对应 `GET /api/documents/{id}/export`。
+- **标注包导入**：顶栏「导入标注包」粘贴或选择导出的 JSON，把标注迁移到当前文档——
+  - 按**编码名称**映射到当前编码本；依次校验**文档内容指纹**（`content_sha256`，缺失时退化为全文比对，两者皆无则拒绝导入）、**区间边界**（`0 <= start < end <= 全文长度`）与**重复项**（与既有标注或包内前序条目完全相同）；
+  - `POST /api/documents/{id}/import/preview` 预检并预览**新增、跳过、未知编码、冲突**（与既有或本批新增标注同名重叠/嵌套）及非法区间明细，不写库；
+  - 确认后 `POST /api/documents/{id}/import` 在**单事务**中仅写入合法新增项；指纹不匹配或存在非法区间等**任何硬校验失败都整批回滚、不落库**；未知编码与冲突条目不导入，仅在结果中列明；
+  - 导入成功后正文自动**闪烁定位全部新增区间**。
 - **持久化**：所有文档、编码本、标注均存于 SQLite，刷新页面后原样恢复；首次启动自动载入一份示例访谈与编码。
 
 ## 本地开发（不用 Docker）
@@ -99,7 +104,9 @@ npm run dev   # http://localhost:5173
 | GET | `/api/code-distribution` | 跨文档编码分布对比：全部文档按所选编码汇总标注字符数、段数与占文档长度比例（文档按标题稳定排序，含行内差异百分比与首个片段），单一快照返回缺失编码与空文档提示；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
 | GET | `/api/documents/{id}/gaps` | 覆盖缺口：合并所选编码重叠/相邻的标注区间后求全文补集，返回未覆盖区间的起止位置、长度与原文摘录（保留文首/文尾/零标注场景）及覆盖率；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
 | GET | `/api/documents/{id}/transitions` | 编码流转：全部标注边界切成原子区间并以覆盖编码集合表示状态，跳过无编码区间、合并相邻同状态区间后统计相邻状态的有向转移，返回每次转移的来源、目标区间、中间距离与原文摘录；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
-| GET | `/api/documents/{id}/export` | 导出 JSON（附件下载） |
+| GET | `/api/documents/{id}/export` | 导出 JSON（附件下载，含文档内容指纹 `content_sha256`） |
+| POST | `/api/documents/{id}/import/preview` | 标注包导入预检（body 为导出 JSON）：按编码名称映射，校验文档指纹 / 区间边界 / 重复项，返回新增、跳过、未知编码、冲突与非法区间明细，不写库 |
+| POST | `/api/documents/{id}/import` | 标注包导入：单事务写入全部合法新增标注；指纹不匹配或存在非法区间即整批回滚（422），不落库；返回新增、跳过、未知编码与冲突明细 |
 | GET / POST | `/api/codes` | 编码本列表 / 新建（重名返回 409） |
 | PUT / DELETE | `/api/codes/{id}` | 重命名、改色 / 删除（级联删除标注） |
 | POST | `/api/codings/preview` | 冲突预览 `{document_id, code_id, start, end, exclude_id?}` |
@@ -122,11 +129,12 @@ npm run dev   # http://localhost:5173
 │       ├── distribution.py   # 跨文档编码分布对比统计纯函数
 │       ├── gaps.py           # 覆盖缺口（区间并集补集）纯函数
 │       ├── transitions.py    # 编码流转（状态区间切分与有向转移统计）纯函数
+│       ├── importer.py       # 标注包导入（解析 / 指纹校验 / 分类）纯函数
 │       └── db.py             # SQLite 连接、建表、示例数据
 └── frontend/
     ├── Dockerfile          # 多阶段构建：Vite build → nginx
     ├── nginx.conf          # 静态托管 + /api 反向代理
     └── src/
         ├── App.jsx         # 状态编排与冲突决策流
-        └── components/     # TextView / CodingForm / SearchBatchPanel / ConflictDialog / Sidebar / CooccurrenceView / SpeakerView / DistributionView / GapView / TransitionView
+        └── components/     # TextView / CodingForm / SearchBatchPanel / ConflictDialog / ImportDialog / Sidebar / CooccurrenceView / SpeakerView / DistributionView / GapView / TransitionView
 ```

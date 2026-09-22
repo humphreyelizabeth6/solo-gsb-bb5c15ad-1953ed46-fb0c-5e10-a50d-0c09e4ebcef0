@@ -68,4 +68,9 @@ export const api = {
   deleteCoding: (id) => request(`/codings/${id}`, { method: 'DELETE' }),
 
   exportUrl: (docId) => `${BASE}/documents/${docId}/export`,
+  // 标注包导入：payload 为导出 JSON；preview 预检不写库，import 单事务导入
+  previewImport: (docId, payload) =>
+    request(`/documents/${docId}/import/preview`, { method: 'POST', body: JSON.stringify(payload) }),
+  importPackage: (docId, payload) =>
+    request(`/documents/${docId}/import`, { method: 'POST', body: JSON.stringify(payload) }),
 }

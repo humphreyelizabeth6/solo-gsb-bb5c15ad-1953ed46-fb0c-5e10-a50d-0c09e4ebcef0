@@ -3,6 +3,7 @@ import { api } from './api'
 import TextView from './components/TextView'
 import CodingForm from './components/CodingForm'
 import ConflictDialog from './components/ConflictDialog'
+import ImportDialog from './components/ImportDialog'
 import Sidebar from './components/Sidebar'
 import CooccurrenceView from './components/CooccurrenceView'
 import SpeakerView from './components/SpeakerView'
@@ -21,8 +22,11 @@ export default function App() {
   const [editing, setEditing] = useState(null)
   const [conflict, setConflict] = useState(null) // {preview, payload}
   const [flashRange, setFlashRange] = useState(null)
+  const [flashRanges, setFlashRanges] = useState(null) // 多区间闪烁（导入结果定位）
   const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
   const [showNewDoc, setShowNewDoc] = useState(false)
+  const [showImport, setShowImport] = useState(false)
   const [newDoc, setNewDoc] = useState({ title: '', content: '' })
   const [view, setView] = useState('text') // text | cooccurrence | speakers | distribution | gaps | transitions
   const [coocStats, setCoocStats] = useState(null)
@@ -43,10 +47,16 @@ export default function App() {
   const [gapMinLen, setGapMinLen] = useState(1) // 最小缺口长度筛选
   const [gapCursor, setGapCursor] = useState(-1) // 上一处/下一处导航位置
   const [pendingLocate, setPendingLocate] = useState(null)
+  const [importFlash, setImportFlash] = useState(null) // {docId, ranges} 导入新增待定位
 
   const showError = useCallback((e) => {
     setError(e.message || String(e))
     setTimeout(() => setError(null), 5000)
+  }, [])
+
+  const showNotice = useCallback((msg) => {
+    setNotice(msg)
+    setTimeout(() => setNotice(null), 5000)
   }, [])
 
   const loadCodes = useCallback(async () => {
@@ -87,6 +97,7 @@ export default function App() {
       setSelection(null)
       // 跨文档定位的待定位片段指向新文档本身，需保留；其余情况清除
       setPendingLocate((cur) => (cur && cur.docId === docId ? cur : null))
+      setImportFlash((cur) => (cur && cur.docId === docId ? cur : null))
       loadDocument(docId)
     }
   }, [docId, loadDocument])
@@ -397,6 +408,44 @@ export default function App() {
     }
   }, [view, pendingLocate, docData])
 
+  // ---------- 标注包导入 ----------
+
+  // 导入成功：关闭弹窗、切回正文并闪烁定位全部新增区间
+  async function handleImported(result) {
+    setShowImport(false)
+    setView('text')
+    if (result.created.length > 0) {
+      setImportFlash({
+        docId,
+        ranges: result.created.map((c) => ({ start: c.start, end: c.end })),
+      })
+    }
+    const unknownCount = result.unknown_codes.reduce((n, g) => n + g.count, 0)
+    showNotice(
+      `导入完成：新增 ${result.created.length} 条，跳过 ${result.skipped.length} 条` +
+        (unknownCount > 0 ? `，未知编码 ${unknownCount} 条未导入` : '') +
+        (result.conflicts.length > 0 ? `，冲突 ${result.conflicts.length} 条未导入` : '')
+    )
+    await refresh()
+  }
+
+  // 正文渲染完成后闪烁定位导入的新增区间（等文档刷新后再滚动）
+  useEffect(() => {
+    if (view !== 'text' || !importFlash) return
+    if (!docData || docData.document.id !== importFlash.docId) return
+    const ranges = importFlash.ranges
+    setFlashRanges(ranges)
+    const t = setTimeout(() => scrollToRange(ranges[0]), 60)
+    const clear = setTimeout(() => {
+      setFlashRanges(null)
+      setImportFlash(null)
+    }, 2200)
+    return () => {
+      clearTimeout(t)
+      clearTimeout(clear)
+    }
+  }, [view, importFlash, docData])
+
   function toggleFilter(id) {
     setFilters((cur) => {
       const next = new Set(cur === null ? codebook.map((c) => c.id) : cur)
@@ -464,6 +513,7 @@ export default function App() {
           <a className="btn" href={api.exportUrl(docId)} download>
             导出 JSON
           </a>
+          <button onClick={() => setShowImport(true)}>导入标注包</button>
         </div>
       </header>
 
@@ -487,6 +537,7 @@ export default function App() {
       )}
 
       {error && <div className="error-banner">{error}</div>}
+      {notice && <div className="notice-banner">{notice}</div>}
 
       <main className="layout">
         <section className="text-panel">
@@ -553,6 +604,7 @@ export default function App() {
               codings={visibleCodings}
               selection={selection}
               flashRange={flashRange}
+              flashRanges={flashRanges}
               onSelect={(range) => {
                 setSelection(range)
                 if (editing) setEditing(null)
@@ -641,6 +693,14 @@ export default function App() {
           content={doc.content}
           onResolve={handleResolve}
           onCancel={() => setConflict(null)}
+        />
+      )}
+
+      {showImport && (
+        <ImportDialog
+          docId={docId}
+          onImported={handleImported}
+          onCancel={() => setShowImport(false)}
         />
       )}
     </div>
