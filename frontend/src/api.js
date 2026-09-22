@@ -63,6 +63,17 @@ export const api = {
     request('/codings', { method: 'POST', body: JSON.stringify(payload) }),
   batchCreateCodings: (payload) =>
     request('/codings/batch', { method: 'POST', body: JSON.stringify(payload) }),
+  // 标注包导入：预检（不落库）/ 确认（单事务写入）
+  previewImport: (id, pkg) =>
+    request(`/documents/${id}/import/preview`, {
+      method: 'POST',
+      body: JSON.stringify({ package: pkg }),
+    }),
+  confirmImport: (id, pkg) =>
+    request(`/documents/${id}/import`, {
+      method: 'POST',
+      body: JSON.stringify({ package: pkg }),
+    }),
   updateCoding: (id, payload) =>
     request(`/codings/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteCoding: (id) => request(`/codings/${id}`, { method: 'DELETE' }),

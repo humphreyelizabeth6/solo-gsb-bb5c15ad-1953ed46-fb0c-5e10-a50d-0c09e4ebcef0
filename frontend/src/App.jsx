@@ -10,6 +10,7 @@ import DistributionView from './components/DistributionView'
 import GapView from './components/GapView'
 import TransitionView from './components/TransitionView'
 import SearchBatchPanel from './components/SearchBatchPanel'
+import ImportDialog from './components/ImportDialog'
 
 export default function App() {
   const [docs, setDocs] = useState([])
@@ -43,6 +44,7 @@ export default function App() {
   const [gapMinLen, setGapMinLen] = useState(1) // 最小缺口长度筛选
   const [gapCursor, setGapCursor] = useState(-1) // 上一处/下一处导航位置
   const [pendingLocate, setPendingLocate] = useState(null)
+  const [showImport, setShowImport] = useState(false)
 
   const showError = useCallback((e) => {
     setError(e.message || String(e))
@@ -464,6 +466,7 @@ export default function App() {
           <a className="btn" href={api.exportUrl(docId)} download>
             导出 JSON
           </a>
+          <button onClick={() => setShowImport(true)}>导入标注包</button>
         </div>
       </header>
 
@@ -641,6 +644,16 @@ export default function App() {
           content={doc.content}
           onResolve={handleResolve}
           onCancel={() => setConflict(null)}
+        />
+      )}
+
+      {showImport && (
+        <ImportDialog
+          key={docId}
+          docId={docId}
+          onClose={() => setShowImport(false)}
+          onImported={refresh}
+          onLocate={handleLocateSegment}
         />
       )}
     </div>

@@ -69,7 +69,15 @@ docker compose up --build
   - 前端支持**最小次数**与**最大间距**筛选（本地过滤，不重新请求）；展开条目查看每次转移的来源 / 目标**原文上下文**，点击实例自动切回正文、滚动并**闪烁定位来源起点到目标终点的整个跨度**；
   - 编码筛选或标注变化后转移列表同步刷新；**零标注**（无状态区间）与**无转移**（仅一段状态区间）时给出明确空状态。
   - 对应 `GET /api/documents/{id}/transitions?codes=1,2`（`codes` 为逗号分隔，缺省统计全部编码）。
-- **JSON 导出**：顶栏「导出 JSON」下载当前文档的完整编码结果（含每条标注的区间与原文切片），对应 `GET /api/documents/{id}/export`。
+- **JSON 导出**：顶栏「导出 JSON」下载当前文档的完整编码结果（含每条标注的区间、原文切片与文档内容指纹 `fingerprint`），对应 `GET /api/documents/{id}/export`。
+- **标注包导入**：顶栏「导入标注包」可**粘贴**导出 JSON 文本或**选择 `.json` 文件**，把另一份（或此前导出的）编码结果导入**当前文档**——
+  - **编码按名称映射**：以编码**名称**对齐当前编码本（忽略导出文件中的编码 id，避免不同库 id 错位）；当前编码本中没有同名编码的条目标记为**未知编码**，需先在编码本新建同名编码再导入；
+  - **校验内容指纹**：导出包含 `sha256` 内容指纹，指纹与当前文档不一致直接阻断（旧版无指纹导出退化为「文档长度 + 逐条原文切片」校验并给出提示）；同时逐条校验**区间边界**（整数、`start < end`、不超出文本长度）与**原文切片**是否与当前文档一致，区间错位会被标出；
+  - **重复项识别**：与当前文档既有标注完全相同（同编码、同区间）记为跳过（附既有标注 id），标注包内部的重复条目同样跳过；
+  - **预检明细**：确认前先展示**新增 / 跳过 / 未知编码 / 非法条目**四类明细与计数；新增项若与既有标注同名重叠或嵌套，会列出**冲突明细**（导入按 keep 保留边界共存，不做合并 / 拆分）；存在任一阻断项时确认按钮禁用；
+  - **单事务落库**：确认后在**单个事务**内重跑全部校验再写入，任一校验失败（指纹不一致、非法区间 / 切片、未知编码）整批回滚、**不落库**；
+  - **定位新增结果**：导入成功后结果面板列出全部新增标注，点击「定位」（或「定位第一条新增」）自动切回正文、滚动并闪烁高亮。
+  - 对应 `POST /api/documents/{id}/import/preview`（预检，不落库）与 `POST /api/documents/{id}/import`（确认导入，单事务）。
 - **持久化**：所有文档、编码本、标注均存于 SQLite，刷新页面后原样恢复；首次启动自动载入一份示例访谈与编码。
 
 ## 本地开发（不用 Docker）
@@ -99,7 +107,9 @@ npm run dev   # http://localhost:5173
 | GET | `/api/code-distribution` | 跨文档编码分布对比：全部文档按所选编码汇总标注字符数、段数与占文档长度比例（文档按标题稳定排序，含行内差异百分比与首个片段），单一快照返回缺失编码与空文档提示；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
 | GET | `/api/documents/{id}/gaps` | 覆盖缺口：合并所选编码重叠/相邻的标注区间后求全文补集，返回未覆盖区间的起止位置、长度与原文摘录（保留文首/文尾/零标注场景）及覆盖率；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
 | GET | `/api/documents/{id}/transitions` | 编码流转：全部标注边界切成原子区间并以覆盖编码集合表示状态，跳过无编码区间、合并相邻同状态区间后统计相邻状态的有向转移，返回每次转移的来源、目标区间、中间距离与原文摘录；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
-| GET | `/api/documents/{id}/export` | 导出 JSON（附件下载） |
+| GET | `/api/documents/{id}/export` | 导出 JSON（附件下载，含 sha256 内容指纹） |
+| POST | `/api/documents/{id}/import/preview` | 标注包导入预检（不落库）：请求体 `{package: <导出 JSON>}`；按编码名称映射编码本，校验内容指纹 / 区间边界 / 原文切片 / 重复项，返回新增、跳过、未知编码、非法条目明细与新增项冲突明细 |
+| POST | `/api/documents/{id}/import` | 确认导入：单事务重跑全部校验，任一失败整批回滚（422，不落库）；仅写入新增标注（keep 共存），完全相同项跳过，返回新增 / 跳过明细与最新标注列表 |
 | GET / POST | `/api/codes` | 编码本列表 / 新建（重名返回 409） |
 | PUT / DELETE | `/api/codes/{id}` | 重命名、改色 / 删除（级联删除标注） |
 | POST | `/api/codings/preview` | 冲突预览 `{document_id, code_id, start, end, exclude_id?}` |
@@ -122,11 +132,12 @@ npm run dev   # http://localhost:5173
 │       ├── distribution.py   # 跨文档编码分布对比统计纯函数
 │       ├── gaps.py           # 覆盖缺口（区间并集补集）纯函数
 │       ├── transitions.py    # 编码流转（状态区间切分与有向转移统计）纯函数
+│       ├── importing.py      # 标注包导入：指纹 / 映射 / 校验 / 分类（预览计划）纯函数
 │       └── db.py             # SQLite 连接、建表、示例数据
 └── frontend/
     ├── Dockerfile          # 多阶段构建：Vite build → nginx
     ├── nginx.conf          # 静态托管 + /api 反向代理
     └── src/
         ├── App.jsx         # 状态编排与冲突决策流
-        └── components/     # TextView / CodingForm / SearchBatchPanel / ConflictDialog / Sidebar / CooccurrenceView / SpeakerView / DistributionView / GapView / TransitionView
+        └── components/     # TextView / CodingForm / SearchBatchPanel / ImportDialog / ConflictDialog / Sidebar / CooccurrenceView / SpeakerView / DistributionView / GapView / TransitionView
 ```

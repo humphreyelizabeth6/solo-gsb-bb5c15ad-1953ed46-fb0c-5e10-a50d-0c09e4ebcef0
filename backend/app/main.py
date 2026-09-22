@@ -22,6 +22,12 @@ from .cooccurrence import build_code_intervals, intersect_intervals
 from .db import get_db, init_db, list_codings, next_color
 from .distribution import compute_distribution
 from .gaps import compute_gaps
+from .importing import (
+    PackageFormatError,
+    build_import_preview,
+    content_fingerprint,
+    parse_package,
+)
 from .speakers import compute_speaker_stats
 from .transitions import compute_transitions
 
@@ -77,6 +83,12 @@ class BatchCodingCreate(BaseModel):
     document_id: int
     code_id: int
     items: list[BatchCodingItem] = Field(min_length=1, max_length=1000)
+
+
+class AnnotationPackage(BaseModel):
+    """标注包导入请求：正文为「导出 JSON」原文（dict 形式）。"""
+
+    package: dict
 
 
 # ---------- 应用 ----------
@@ -411,6 +423,106 @@ def create_codings_batch(body: BatchCodingCreate) -> dict:
         }
 
 
+# ---------- 标注包导入（导出 JSON → 当前文档） ----------
+
+
+def prepare_import(conn, document_id: int, package: dict) -> tuple[dict, dict, list[dict]]:
+    """在当前连接快照上构建导入预览，返回 (doc, preview, code_rows)。
+
+    结构无法解析时抛 422（标注包格式错误）。
+    """
+    doc = get_document_or_404(conn, document_id)
+    try:
+        src_doc, items = parse_package(package)
+    except PackageFormatError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    code_rows = [
+        dict(r)
+        for r in conn.execute("SELECT id, name, color FROM codes ORDER BY id").fetchall()
+    ]
+    existing = list_codings(conn, document_id)
+    preview = build_import_preview(
+        document_id, doc["content"], src_doc, items, code_rows, existing
+    )
+    return doc, preview, code_rows
+
+
+@app.post("/api/documents/{document_id}/import/preview")
+def import_preview(document_id: int, body: AnnotationPackage) -> dict:
+    """标注包导入预检（不落库）。
+
+    按编码名称映射当前编码本，校验文档内容指纹、区间边界与原文切片、重复项，
+    返回新增 / 跳过 / 未知编码 / 非法条目分类及新增项的冲突明细。
+    """
+    with get_db() as conn:
+        _, preview, _ = prepare_import(conn, document_id, body.package)
+    return preview
+
+
+@app.post("/api/documents/{document_id}/import", status_code=201)
+def import_confirm(document_id: int, body: AnnotationPackage) -> dict:
+    """确认导入：单事务写入全部合法（新增）标注。
+
+    先在事务内重跑全部校验：指纹不一致、存在非法区间 / 切片不匹配或未知编码
+    时抛 422，整批回滚、不落库。通过后仅写入预览分类为「新增」的标注，
+    完全相同的既有标注 / 包内重复项按跳过处理；新增项按 keep（保留边界）
+    写入，不做合并 / 拆分。
+    """
+    with get_db() as conn:
+        _, preview, _ = prepare_import(conn, document_id, body.package)
+        if not preview["can_import"]:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "校验未通过，标注包未导入",
+                    "blockers": preview["blockers"],
+                    "summary": preview["summary"],
+                },
+            )
+
+        # 以事务内最新快照再去重一次（created 已在预览时去重，此处防御并发写入）
+        id_by_key = {
+            (c["code_id"], c["start"], c["end"]): c["id"]
+            for c in list_codings(conn, document_id)
+        }
+        created: list[dict] = []
+        extra_skipped: list[dict] = []
+        for it in preview["created"]:
+            key = (it["code_id"], it["start"], it["end"])
+            if key in id_by_key:
+                extra_skipped.append(
+                    {
+                        **{k: it[k] for k in ("index", "code_name", "start", "end")},
+                        "reason": "existing",
+                        "existing_id": id_by_key[key],
+                    }
+                )
+                continue
+            cur = conn.execute(
+                INSERT_CODING,
+                (document_id, it["code_id"], it["start"], it["end"]),
+            )
+            id_by_key[key] = cur.lastrowid
+            created.append(
+                {
+                    "id": cur.lastrowid,
+                    "code_id": it["code_id"],
+                    "code_name": it["code_name"],
+                    "color": it["color"],
+                    "start": it["start"],
+                    "end": it["end"],
+                    "text": it["text"],
+                    "conflicts": it["conflicts"],
+                }
+            )
+        # 校验通过但全部为重复项：事务正常提交，返回空新增列表
+        return {
+            "created": created,
+            "skipped": [*preview["skipped"], *extra_skipped],
+            "codings": list_codings(conn, document_id),
+        }
+
+
 @app.put("/api/codings/{coding_id}")
 def update_coding(coding_id: int, body: CodingUpdate) -> dict:
     with get_db() as conn:
@@ -475,6 +587,7 @@ def export_document(document_id: int) -> JSONResponse:
             "title": doc["title"],
             "content": content,
             "length": len(content),
+            "fingerprint": content_fingerprint(content),
         },
         "codes": codes,
         "codings": [
